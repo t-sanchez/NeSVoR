@@ -136,7 +136,6 @@ class Volume(Image):
         resolution_new: Optional[Union[float, torch.Tensor]],
         transformation_new: Optional[RigidTransform],
     ) -> Volume:
-
         if transformation_new is None:
             transformation_new = self.transformation
         R = transformation_new.matrix()[0, :3, :3]
@@ -247,6 +246,44 @@ class Stack(object):
                 for i in range(len(transformation))
             ]
 
+    def get_mask_volume(self) -> Volume:
+        mask = self.mask.squeeze(1).clone()
+        return Volume(
+            image=mask.float(),
+            mask=mask > 0,
+            transformation=self.transformation.axisangle_mean(),
+            resolution_x=self.resolution_x,
+            resolution_y=self.resolution_y,
+            resolution_z=self.gap,
+        )
+
+    def get_volume(self) -> Volume:
+        return Volume(
+            image=self.slices.squeeze(1).clone(),
+            mask=self.mask.squeeze(1).clone() > 0,
+            transformation=self.transformation.axisangle_mean(),
+            resolution_x=self.resolution_x,
+            resolution_y=self.resolution_y,
+            resolution_z=self.gap,
+        )
+
+    def apply_volume_mask(self, mask: Volume) -> None:
+        for i in range(len(self)):
+            s = self[i]
+            assign_mask = self.mask[i].clone()
+            self.mask[i][assign_mask] = mask.sample_points(s.xyz_masked) > 0
+
+    def clone(self) -> Stack:
+        return Stack(
+            slices=self.slices.clone(),
+            mask=self.mask.clone(),
+            transformation=self.transformation.clone(),
+            resolution_x=self.resolution_x,
+            resolution_y=self.resolution_y,
+            thickness=self.thickness,
+            gap=self.gap,
+        )
+
 
 def save_nii_volume(
     path: str,
@@ -264,6 +301,10 @@ def save_nii_volume(
         affine = affine.detach().cpu().numpy()
     if affine is None:
         affine = np.eye(4)
+    if volume.dtype == bool and isinstance(
+        volume, np.ndarray
+    ):  # bool type is not supported
+        volume = volume.astype(np.int16)
     img = nib.nifti1.Nifti1Image(volume, affine)
     img.header.set_xyzt_units(2)
     img.header.set_qform(affine, code="aligned")

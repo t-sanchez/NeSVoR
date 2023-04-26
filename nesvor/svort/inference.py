@@ -14,12 +14,14 @@ from ..image import Stack, Slice
 from .. import __checkpoint_dir, __pretrained_svort
 
 
-def compute_score(ncc, ncc_weight):
+def compute_score(ncc: torch.Tensor, ncc_weight: torch.Tensor) -> float:
     ncc_weight = ncc_weight.view(ncc.shape)
     return -((ncc * ncc_weight).sum() / ncc_weight.sum()).item()
 
 
-def get_transform_diff_mean(transform_out, transform_in, mean_r=3):
+def get_transform_diff_mean(
+    transform_out: RigidTransform, transform_in: RigidTransform, mean_r: int = 3
+) -> Tuple[RigidTransform, RigidTransform]:
     transform_diff = transform_out.compose(transform_in.inv())
     transform_diff_ax = transform_diff.axisangle()
     mid = transform_diff_ax.shape[0] // 2
@@ -29,7 +31,7 @@ def get_transform_diff_mean(transform_out, transform_in, mean_r=3):
     return RigidTransform(transform_diff_mean), transform_diff
 
 
-def average_rotation(R):
+def average_rotation(R: torch.Tensor) -> torch.Tensor:
     import scipy
     from scipy.spatial.transform import Rotation
 
@@ -64,22 +66,36 @@ def average_rotation(R):
     return torch.tensor(S[None], dtype=dtype, device=device)
 
 
-def run_model(transforms, stacks, model, res_s, s_thick, res_r):
+def run_model(
+    transforms: List[RigidTransform],
+    stacks: List[torch.Tensor],
+    model: torch.nn.Module,
+    res_s: float,
+    s_thick: float,
+    res_r: float,
+) -> Tuple[List[RigidTransform], torch.Tensor]:
     # run models
     device = stacks[0].device
     slice_shape = stacks[0].shape[-2:]
-    positions = [
+    positions_ = [
         torch.arange(slices.shape[0], dtype=slices.dtype, device=device)
         - slices.shape[0] // 2
         for slices in stacks
     ]
 
-    transforms_out = []
+    transforms_out: List[RigidTransform] = []
     with torch.no_grad():
         n_run = max(1, len(stacks) - 2)
         for j in range(n_run):
             idxes = [0, 1, j + 2] if j > 0 else list(range(min(3, len(stacks))))
             volume_shape = (256, 256, 256)
+            positions = torch.cat(
+                [
+                    torch.stack((positions_[i], torch.ones_like(positions_[i]) * k), -1)
+                    for k, i in enumerate(idxes)
+                ],
+                dim=0,
+            )
             data = {
                 "psf_rec": get_PSF(
                     res_ratio=(res_s / res_r, res_s / res_r, s_thick / res_r),
@@ -94,15 +110,7 @@ def run_model(transforms, stacks, model, res_s, s_thick, res_r):
                     [transforms[idx] for idx in idxes]
                 ).matrix(),
                 "stacks": torch.cat([stacks[idx] for idx in idxes], dim=0),
-                "positions": torch.cat(
-                    [
-                        torch.stack(
-                            (positions[i], torch.ones_like(positions[i]) * k), -1
-                        )
-                        for k, i in enumerate(idxes)
-                    ],
-                    dim=0,
-                ),
+                "positions": positions,
             }
             t_out, v_out, _ = model(data)
             t_out = t_out[-1]
@@ -112,26 +120,33 @@ def run_model(transforms, stacks, model, res_s, s_thick, res_r):
 
             transforms_diff = []
             for ns in range(len(idxes)):
-                idx = data["positions"][:, -1] == ns
+                idx = positions[:, -1] == ns
                 if j > 0 and ns != 2:  # anchor stack
                     transform_diff = transforms_out[ns].compose(t_out[idx].inv())
-                    transform_diff = transform_diff.axisangle()
-                    mid = transform_diff.shape[0] // 2
-                    transforms_diff.append(transform_diff[mid - 3 : mid + 3])
+                    transform_diff_ax = transform_diff.axisangle()
+                    mid = transform_diff_ax.shape[0] // 2
+                    transforms_diff.append(transform_diff_ax[mid - 3 : mid + 3])
                     continue
                 transforms_out.append(t_out[idx])  # new stack
                 if j > 0:  # correct stack transformation according to anchor stacks
-                    transform_diff = torch.cat(transforms_diff, 0)
-                    meanT = transform_diff[:, 3:].mean(0, keepdim=True)
-                    meanR = average_rotation(transform_diff[:, :3])
-                    transform_diff_mean = torch.cat((meanR, meanT), -1)
-                    transforms_out[-1] = RigidTransform(transform_diff_mean).compose(
+                    transform_diff_ax = torch.cat(transforms_diff, 0)
+                    meanT = transform_diff_ax[:, 3:].mean(0, keepdim=True)
+                    meanR = average_rotation(transform_diff_ax[:, :3])
+                    transform_diff_mean_ax = torch.cat((meanR, meanT), -1)
+                    transforms_out[-1] = RigidTransform(transform_diff_mean_ax).compose(
                         transforms_out[-1]
                     )
     return transforms_out, volume
 
 
-def run_model_all_stack(transforms, stacks, model, res_s, s_thick, res_r):
+def run_model_all_stack(
+    transforms: List[RigidTransform],
+    stacks: List[torch.Tensor],
+    model: torch.nn.Module,
+    res_s: float,
+    s_thick: float,
+    res_r: float,
+) -> Tuple[List[RigidTransform], torch.Tensor]:
     # run models
     device = stacks[0].device
     dtype = stacks[0].dtype
@@ -173,7 +188,18 @@ def run_model_all_stack(transforms, stacks, model, res_s, s_thick, res_r):
     return transforms_out, v_out[-1]
 
 
-def parse_data(dataset, res_s):
+def parse_data(
+    dataset: List[Stack], res_s: float, svort: bool
+) -> Tuple[
+    List[torch.Tensor],
+    List[torch.Tensor],
+    List[RigidTransform],
+    List[RigidTransform],
+    List[RigidTransform],
+    List[torch.Tensor],
+    float,
+    List[float],
+]:
     stacks = []  # resampled, cropped, normalized
     stacks_ori = []  # resampled
     transforms = []  # cropped, reset (SVoRT input)
@@ -201,7 +227,7 @@ def parse_data(dataset, res_s):
             j1 += 1
         while s[:, j2].sum() == 0:
             j2 -= 1
-        if (i2 - i1) > 128 or (j2 - j1) > 128:
+        if ((i2 - i1) > 128 or (j2 - j1) > 128) and svort:
             logging.warning("ROI in the data is too large for SVoRT")
         pad_margin = 64
         slices = F.pad(
@@ -214,7 +240,7 @@ def parse_data(dataset, res_s):
         nnz = (slices > 0).float().sum((1, 2, 3))
         idx = nnz > 0
         nz = torch.nonzero(idx)
-        idx[nz[0, 0] : nz[-1, 0] + 1] = True
+        idx[int(nz[0, 0]) : int(nz[-1, 0] + 1)] = True
         crop_idx.append(idx)
         slices = slices[idx]
         # normalize
@@ -222,19 +248,19 @@ def parse_data(dataset, res_s):
         # transformation
         transform = data.transformation
         transforms_ori.append(transform)
-        transform_full = transform.axisangle().clone()
-        transform = transform_full[idx].clone()
+        transform_full_ax = transform.axisangle().clone()
+        transform_ax = transform_full_ax[idx].clone()
 
-        transform_full[:, :-1] = 0
-        transform_full[:, 3] = -((j1 + j2) // 2 - slices_ori.shape[-1] / 2) * res_s
-        transform_full[:, 4] = -((i1 + i2) // 2 - slices_ori.shape[-2] / 2) * res_s
-        transform_full[:, -1] -= transform[:, -1].mean()
+        transform_full_ax[:, :-1] = 0
+        transform_full_ax[:, 3] = -((j1 + j2) // 2 - slices_ori.shape[-1] / 2) * res_s
+        transform_full_ax[:, 4] = -((i1 + i2) // 2 - slices_ori.shape[-2] / 2) * res_s
+        transform_full_ax[:, -1] -= transform_ax[:, -1].mean()
 
-        transform[:, :-1] = 0
-        transform[:, -1] -= transform[:, -1].mean()
+        transform_ax[:, :-1] = 0
+        transform_ax[:, -1] -= transform_ax[:, -1].mean()
 
-        transforms.append(RigidTransform(transform))
-        transforms_full.append(RigidTransform(transform_full))
+        transforms.append(RigidTransform(transform_ax))
+        transforms_full.append(RigidTransform(transform_full_ax))
 
     return (
         stacks,
@@ -244,10 +270,19 @@ def parse_data(dataset, res_s):
         transforms_ori,
         crop_idx,
         np.mean([data.thickness for data in dataset]),
+        [data.gap for data in dataset],
     )
 
 
-def correct_svort(transforms_out, transforms_in, stacks, volume, res_s, s_thick, res_r):
+def correct_svort(
+    transforms_out: List[RigidTransform],
+    transforms_in: List[RigidTransform],
+    stacks: List[torch.Tensor],
+    volume: torch.Tensor,
+    res_s: float,
+    s_thick: float,
+    res_r: float,
+) -> Tuple[List[RigidTransform], float]:
     # correct transorms
     logging.debug("Correcting SVoRT results with stack transformations ...")
     # compute stack transformation
@@ -286,7 +321,12 @@ def correct_svort(transforms_out, transforms_in, stacks, volume, res_s, s_thick,
     return transforms_corrected, score_svort
 
 
-def get_transforms_full(transforms_out, transforms_in, transforms_full, crop_idx):
+def get_transforms_full(
+    transforms_out: List[RigidTransform],
+    transforms_in: List[RigidTransform],
+    transforms_full: List[RigidTransform],
+    crop_idx: List[torch.Tensor],
+) -> Tuple[List[RigidTransform], List[RigidTransform]]:
     # full stack
     transforms_svort_full = []
     transforms_stack_full = []
@@ -305,19 +345,23 @@ def get_transforms_full(transforms_out, transforms_in, transforms_full, crop_idx
     return transforms_svort_full, transforms_stack_full
 
 
-def stack_registration(transforms_list, transform_target, stacks, res_s, s_thick):
+def stack_registration(
+    transforms_list: List[List[RigidTransform]],
+    transform_target: RigidTransform,
+    stacks: List[torch.Tensor],
+    res_s: float,
+    gaps: List[float],
+    centering: bool,
+) -> List[RigidTransform]:
     # stack registration
     device = transform_target.device
 
-    def t_mean(t):
-        return RigidTransform(t.axisangle().mean(0, keepdim=True))
-
-    t_target = t_mean(transform_target)
+    t_target = transform_target.axisangle_mean()
     ts_in = [
-        [t_mean(transform) for transform in transforms]
+        [transform.axisangle_mean() for transform in transforms]
         for transforms in transforms_list
     ]
-    params = {"res_s": res_s, "s_thick": s_thick}
+
     vvr = VVR(
         num_levels=3,
         num_steps=4,
@@ -333,10 +377,18 @@ def stack_registration(transforms_list, transform_target, stacks, res_s, s_thick
         if j == 0:
             ts_registered.append(t_target)
         else:
+            params = {
+                "res_x_source": res_s,
+                "res_y_source": res_s,
+                "gap_source": gaps[j],
+                "res_x_target": res_s,
+                "res_y_target": res_s,
+                "gap_target": gaps[0],
+            }
             source = stacks[j].squeeze(1)[None, None]
             target = stacks[0].squeeze(1)[None, None]
             ncc_min = float("inf")
-            ax_out = None
+            ax_out: torch.Tensor
             for k in range(len(ts_in)):
                 ax = (
                     t_target.compose(ts_in[k][0].inv())
@@ -348,26 +400,36 @@ def stack_registration(transforms_list, transform_target, stacks, res_s, s_thick
                     ncc_min, ax_out = ncc, ax
             ts_registered.append(RigidTransform(ax_out, trans_first=trans_first))
 
-    t_center = ts_registered[0].axisangle(trans_first=False).clone()
-    t_center[..., :3] = 0
-    t_center[..., 3:] *= -1
-    t_center = RigidTransform(t_center)
+    t_center_ax = ts_registered[0].axisangle(trans_first=False).clone()
+    t_center_ax[..., :3] = 0
+    t_center_ax[..., 3:] *= -1
+    t_center = RigidTransform(t_center_ax)
 
     transforms_out = []
     for j in range(len(stacks)):
         n_slice = stacks[j].shape[0]
-        t = torch.zeros((n_slice, 6), dtype=torch.float32, device=device)
-        t[:, -1] = (
+        t_ax = torch.zeros((n_slice, 6), dtype=torch.float32, device=device)
+        t_ax[:, -1] = (
             torch.arange(n_slice, dtype=torch.float32, device=device)
             - (n_slice - 1) / 2
-        ) * s_thick
-        t = t_center.compose(ts_registered[j]).compose(RigidTransform(t))
+        ) * gaps[j]
+        if centering:
+            t = t_center.compose(ts_registered[j]).compose(RigidTransform(t_ax))
+        else:
+            t = ts_registered[j].compose(RigidTransform(t_ax))
         transforms_out.append(t)
 
     return transforms_out
 
 
-def reconstruct_from_stacks(transforms, stacks, res_s, s_thick, res_r, n_stack_recon):
+def reconstruct_from_stacks(
+    transforms: List[RigidTransform],
+    stacks: List[torch.Tensor],
+    res_s: float,
+    s_thick: float,
+    res_r: float,
+    n_stack_recon: Optional[int],
+) -> torch.Tensor:
     device = stacks[0].device
     size_max = max([max(stacks[j].shape[-2:]) for j in range(len(stacks))])
     stacks_pad = [stack for stack in stacks]
@@ -444,7 +506,14 @@ def simulated_ncc(
     return ncc_all, ncc_weight_all
 
 
-def run_svort(dataset, model, svort, vvr, force_vvr):
+def run_svort(
+    dataset: List[Stack],
+    model: Optional[torch.nn.Module],
+    svort: bool,
+    vvr: bool,
+    force_vvr: bool,
+    force_scanner: bool,
+) -> List[Slice]:
 
     res_s = 1.0
     res_r = 0.8
@@ -458,7 +527,8 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
             transforms_ori,
             crop_idx,
             s_thick,
-        ) = parse_data(dataset, res_s)
+            gaps,
+        ) = parse_data(dataset, res_s, svort)
 
     if svort:
         time_start = time.time()
@@ -466,10 +536,12 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
             transforms_svort, volume_svort = run_model(
                 transforms_cropped_reset, stacks_cropped, model, res_s, s_thick, res_r
             )
-        else:
+        elif isinstance(model, SVoRTv2):
             transforms_svort, volume_svort = run_model_all_stack(
                 transforms_cropped_reset, stacks_cropped, model, res_s, s_thick, res_r
             )
+        else:
+            raise TypeError("unkown SVoRT model!")
         logging.debug("time for running SVoRT: %f s" % (time.time() - time_start))
 
         time_start = time.time()
@@ -503,7 +575,8 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
             transforms_stack_full[0] if svort else transforms_ori[0],
             stacks_ori,
             res_s,
-            s_thick,
+            gaps,
+            svort,
         )
         logging.debug("time for stack registration: %f s" % (time.time() - time_start))
 
@@ -549,6 +622,15 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
             logging.info("use slice transformation")
             transforms_out = transforms_svort_full
 
+        if force_scanner:
+            transform_scanner = (
+                transforms_ori[0]
+                .axisangle_mean()
+                .compose(transforms_out[0].axisangle_mean().inv())
+            )
+            for j in range(len(dataset)):
+                transforms_out[j] = transform_scanner.compose(transforms_out[j])
+
         for j in range(len(dataset)):
             dataset[j].transformation = transforms_out[j]
 
@@ -557,9 +639,8 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
         idx_nonempty = stack.mask.flatten(1).any(1)
         stack.slices /= torch.quantile(stack.slices[stack.mask], 0.99)
         slices.extend(stack[idx_nonempty])
-    dataset = slices
 
-    return dataset
+    return slices
 
 
 def svort_predict(
@@ -569,6 +650,7 @@ def svort_predict(
     svort: bool,
     vvr: bool,
     force_vvr: bool,
+    force_scanner: bool,
 ) -> List[Slice]:
     model: Optional[torch.nn.Module] = None
     if svort:
@@ -590,4 +672,4 @@ def svort_predict(
         model.to(device)
         model.load_state_dict(cp["model"])
         model.eval()
-    return run_svort(dataset, model, svort, vvr, force_vvr)
+    return run_svort(dataset, model, svort, vvr, force_vvr, force_scanner)

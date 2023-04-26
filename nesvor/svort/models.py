@@ -76,7 +76,7 @@ class SVoRT(nn.Module):
 
         if not self.pe:
             transforms = RigidTransform(transforms.axisangle() * 0)
-            positions = positions * 0 + data["slice_thickness"]
+            positions = positions * 0  # + data["slice_thickness"]
 
         theta = mat2point(
             transforms.matrix(), stacks.shape[-1], stacks.shape[-2], params["res_s"]
@@ -175,7 +175,7 @@ class SVoRTv2(nn.Module):
 
         if not self.pe:
             transforms = RigidTransform(transforms.axisangle() * 0)
-            positions = positions * 0 + data["slice_thickness"]
+            positions = positions * 0  # + data["slice_thickness"]
 
         theta = mat2point(
             transforms.matrix(), stacks.shape[-1], stacks.shape[-2], params["res_s"]

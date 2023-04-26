@@ -3,13 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from ..transform import axisangle2mat
 from ..slice_acquisition import slice_acquisition, slice_acquisition_adjoint
+from typing import Callable, Dict, Optional
 
 
-def dot(x, y):
+def dot(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.dot(x.flatten(), y.flatten())
 
 
-def CG(A, b, x0, n_iter, tol=0.0):
+def CG(
+    A: Callable, b: torch.Tensor, x0: torch.Tensor, n_iter: int, tol: float = 0.0
+) -> torch.Tensor:
     if x0 is None:
         x = 0
         r = b
@@ -34,7 +37,13 @@ def CG(A, b, x0, n_iter, tol=0.0):
         dot_r_r = dot_r_r_new
 
 
-def PSFreconstruction(transforms, slices, slices_mask, vol_mask, params):
+def PSFreconstruction(
+    transforms: torch.Tensor,
+    slices: torch.Tensor,
+    slices_mask: torch.Tensor,
+    vol_mask: torch.Tensor,
+    params: Dict,
+):
     return slice_acquisition_adjoint(
         transforms,
         params["psf"],
@@ -50,8 +59,14 @@ def PSFreconstruction(transforms, slices, slices_mask, vol_mask, params):
 
 class SRR(nn.Module):
     def __init__(
-        self, n_iter=10, use_CG=False, alpha=0.5, beta=0.02, delta=0.1, tol=0.0
-    ):
+        self,
+        n_iter: int = 10,
+        use_CG: bool = False,
+        alpha: float = 0.5,
+        beta: float = 0.02,
+        delta: float = 0.1,
+        tol: float = 0.0,
+    ) -> None:
         super().__init__()
         self.n_iter = n_iter
         self.alpha = alpha
@@ -62,16 +77,16 @@ class SRR(nn.Module):
 
     def forward(
         self,
-        theta,
-        slices,
-        volume,
-        params,
-        p=None,
-        mu=0,
-        z=None,
-        vol_mask=None,
-        slices_mask=None,
-    ):
+        theta: torch.Tensor,
+        slices: torch.Tensor,
+        volume: torch.Tensor,
+        params: Dict,
+        p: Optional[torch.Tensor] = None,
+        mu: float = 0,
+        z: Optional[torch.Tensor] = None,
+        vol_mask: Optional[torch.Tensor] = None,
+        slices_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if len(theta.shape) == 2:
             transforms = axisangle2mat(theta)
         else:
@@ -101,7 +116,14 @@ class SRR(nn.Module):
                 x.add_(g, alpha=-self.alpha)
         return F.relu(x, True)
 
-    def A(self, transforms, x, vol_mask, slices_mask, params):
+    def A(
+        self,
+        transforms: torch.Tensor,
+        x: torch.Tensor,
+        vol_mask: Optional[torch.Tensor],
+        slices_mask: Optional[torch.Tensor],
+        params: Dict,
+    ) -> torch.Tensor:
         return slice_acquisition(
             transforms,
             x,
@@ -114,7 +136,14 @@ class SRR(nn.Module):
             params["interp_psf"],
         )
 
-    def At(self, transforms, x, slices_mask, vol_mask, params):
+    def At(
+        self,
+        transforms: torch.Tensor,
+        x: torch.Tensor,
+        slices_mask: Optional[torch.Tensor],
+        vol_mask: Optional[torch.Tensor],
+        params: Dict,
+    ) -> torch.Tensor:
         return slice_acquisition_adjoint(
             transforms,
             params["psf"],
@@ -127,7 +156,17 @@ class SRR(nn.Module):
             False,
         )
 
-    def AtA(self, transforms, x, vol_mask, slices_mask, p, params, mu, z):
+    def AtA(
+        self,
+        transforms: torch.Tensor,
+        x: torch.Tensor,
+        vol_mask: Optional[torch.Tensor],
+        slices_mask: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
+        params: Dict,
+        mu: float,
+        z: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         slices = self.A(transforms, x, vol_mask, slices_mask, params)
         if p is not None:
             slices = slices * p
@@ -136,7 +175,7 @@ class SRR(nn.Module):
             vol = vol + mu * x
         return vol
 
-    def dR(self, v, delta):
+    def dR(self, v: torch.Tensor, delta: float) -> torch.Tensor:
         g = torch.zeros_like(v)
         D, H, W = v.shape[-3:]
         for dx in [-1, 0, 1]:

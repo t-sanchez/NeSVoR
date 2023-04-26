@@ -28,8 +28,15 @@ class TestVVR(TestCaseNeSVoR):
         trans_first = False
         source = volume
         target = volume
-
-        params = {"res_s": 1, "s_thick": 1.5}
+        params = {
+            "res_x_source": 1,
+            "res_y_source": 1,
+            "gap_source": 1.5,
+            "res_x_target": 1,
+            "res_y_target": 1,
+            "gap_target": 1.5,
+        }
+        # params = {"res_s": 1, "s_thick": 1.5}
         ax = torch.tensor([[0.4, 0.1, -0.6, 20, -50, 100]], dtype=torch.float32).cuda()
         t_target = torch.tensor(
             [[0.4 + 0.05, 0.1 - 0.05, -0.6 + 0.1, 20 + 3, -50 - 2, 100 + 1.5]],

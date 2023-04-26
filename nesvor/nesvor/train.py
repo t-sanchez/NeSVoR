@@ -6,15 +6,14 @@ import torch
 import torch.optim as optim
 import logging
 from ..utils import MovingAverage, gaussian_blur, log_params, TrainLogger
-from .models import INR, NeSVoR, D_LOSS, S_LOSS, DS_LOSS, I_REG, B_REG, T_REG
+from .models import INR, NeSVoR, D_LOSS, S_LOSS, DS_LOSS, I_REG, B_REG, T_REG, D_REG
 from ..transform import RigidTransform, transform_points
 from ..image import Volume, Slice
 
 
 class Dataset(object):
     def __init__(self, slices: List[Slice], args: Namespace) -> None:
-
-        self.mask_threshold = args.mask_threshold
+        self.mask_threshold = 1  # args.mask_threshold
 
         xyz_all = []
         v_all = []
@@ -107,7 +106,6 @@ class Dataset(object):
                 gaussian_blur(mask, (resolution_max / resolution_min).item(), 3)
                 > mask_threshold
             )[0, 0]
-            # print(mask.shape)
 
             xyz_c = xyz_min + (shape_xyz - 1) / 2 * resolution_min
             return Volume(
@@ -123,11 +121,28 @@ class Dataset(object):
 def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volume]:
     # create training dataset
     dataset = Dataset(slices, args)
+
+    use_scaling = True
+    use_centering = True
+    # perform centering and scaling
+    spatial_scaling = 30.0 if use_scaling else 1
+    bb = dataset.bounding_box
+    center = (bb[0] + bb[-1]) / 2 if use_centering else torch.zeros_like(bb[0])
+    ax = (
+        RigidTransform(torch.cat([torch.zeros_like(center), -center])[None])
+        .compose(dataset.transformation)
+        .axisangle()
+    )
+    ax[:, -3:] /= spatial_scaling
+    transformation = RigidTransform(ax)
+    dataset.xyz /= spatial_scaling
+
     model = NeSVoR(
-        dataset.transformation,
-        dataset.resolution,
+        transformation,
+        dataset.resolution / spatial_scaling,
         dataset.mean,
-        dataset.bounding_box,
+        (bb - center) / spatial_scaling,
+        spatial_scaling,
         args,
     )
     # setup optimizer
@@ -170,6 +185,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         T_REG: args.weight_transformation,
         B_REG: args.weight_bias,
         I_REG: args.weight_image,
+        D_REG: args.weight_deform,
     }
     average = MovingAverage(1 - 0.001)
     # logging
@@ -222,6 +238,17 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
     # outputs
     transformation = model.transformation
+
+    # undo centering and scaling
+    ax = transformation.axisangle()
+    ax[:, -3:] *= spatial_scaling
+    transformation = RigidTransform(ax)
+    transformation = RigidTransform(
+        torch.cat([torch.zeros_like(center), center])[None]
+    ).compose(transformation)
+    model.inr.bounding_box.copy_(bb)
+    dataset.xyz *= spatial_scaling
+
     dataset.transformation = transformation
     mask = dataset.mask
     output_slices = []

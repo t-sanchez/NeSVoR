@@ -1,6 +1,6 @@
 # NeSVoR: **Ne**ural **S**lice-to-**Vo**lume **R**econstruction
 
-NeSVoR is a package for GPU-accelerated slice-to-volume reconstruction.
+NeSVoR is a package for GPU-accelerated slice-to-volume reconstruction (both rigid and deformable).
 
 This package is the accumulation of the following works:
 
@@ -20,18 +20,25 @@ This package is the accumulation of the following works:
 - [Overview](#overview)
 - [Installation](#installation)
   - [From Source](#from-source)
+  <!--
     - [Prerequisites](#prerequisites)
     - [Get the NeSVoR Source](#get-the-nesvor-source)
     - [Install Dependencies](#install-dependencies)
-    - [Install NeSVoR](#install-nesvor)
+    - [Install NeSVoR](#install-nesvor)-->
   - [Docker Image](#docker-image)
+  <!--
     - [Install Docker and NVIDIA Container Toolkit](#install-docker-and-nvidia-container-toolkit)
-    - [Download and Run NeSVoR Image](#download-and-run-nesvor-image)
+    - [Download and Run NeSVoR Image](#download-and-run-nesvor-image)-->
+- [Quick Start](#quick-start)
+  - [Fetal Brain Reconstruction](#fetal-brain-reconstruction)
+  - [Fetal Body/Uterus Reconstruction](#fetal-bodyuterus-reconstruction)
 - [Usage](#usage)
   - [Reconstruction](#reconstruction)
   - [Registration](#registration)
   - [Sample Volume](#sample-volume)
-  - [Sample Slices](#sample-slices) <!-- - [Resources](#resources) -->
+  - [Sample Slices](#sample-slices)
+  - [Brain Segmentation](#brain-segmentation)
+  - [Bias Field Correction](#bias-field-correction) <!-- - [Resources](#resources) -->
 - [Cite Our Work](#cite-our-work)
 
 <!-- tocstop -->
@@ -91,7 +98,7 @@ pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/to
 #### Install NeSVoR.
 
 ```
-pip install .
+pip install -e .
 ```
 
 ### Docker Image
@@ -103,22 +110,74 @@ You may follow this [guide](https://docs.nvidia.com/datacenter/cloud-native/cont
 #### Download and Run NeSVoR Image
 
 ```
-docker pull junshenxu/nesvor:v0.1.0
-docker run  --gpus '"device=0"' -it junshenxu/nesvor:v0.1.0
+docker pull junshenxu/nesvor:v0.2.0
+docker run  --gpus '"device=0"' -it junshenxu/nesvor:v0.2.0
+nesvor -h
 ```
-Note: our image was built with CUDA 11.6.
+Note: our image was built with CUDA 11.7.
+
+## Quick Start
+
+### Fetal Brain Reconstruction
+
+This example reconstruct a 3D fetal brain from mutiple stacks of 2D images in the following steps:
+
+1. Segment fetal brain from each image using a CNN.
+2. Correct bias field in each stack using the N4 algorithm.
+3. Register slices using SVoRT.
+4. Reconstruct a 3D volume using NeSVoR.
+
+```
+nesvor reconstruct \
+--input-stacks stack-1.nii.gz ... stack-N.nii.gz \
+--thicknesses <thick-1> ... <thick-N> \
+--output-volume volume.nii.gz \
+--output-resolution 0.8 \
+--registration svort \
+--segmentation \
+--bias-field-correction
+```
+
+### Fetal Body/Uterus Reconstruction
+
+This is an example for deformable NeSVoR which consists of the following steps:
+
+1. Create an ROI based on the intersection of all input stacks.
+3. Perform stack-to-stack registration.
+3. Reconstruct a 3D volume using Deformable NeSVoR (`--deformable`).
+
+```
+nesvor reconstruct \
+--input-stacks stack-1.nii.gz ... stack-N.nii.gz \
+--thicknesses <thick-1> ... <thick-N> \
+--output-volume volume.nii.gz \
+--output-resolution 1.0 \
+--stacks-intersection \
+--registration stack \
+--deformable \
+--weight-transformation 1 \
+--weight-deform 0.1 \
+--weight-image 0.1 \
+--single-precision \
+--log2-hashmap-size 22 \
+--batch-size 8192
+```
 
 ## Usage
 
 NeSVoR currently supports the following commands.
 
-`nesvor reconstruct`: reconstruct a 3D volume (i.e., train a NeSVoR model) from either multiple stacks of slices (NIfTI) or a set of motion-corrected slices (the output of `register`).
+`nesvor reconstruct`: reconstruct a 3D volume (i.e., train a NeSVoR model) from either multiple stacks of slices (NIfTI) or a set of motion-corrected slices (the output of `register`). It can also perform multiple preprocessing steps, including brain segmentation, bias field correction, and registration, by setting the corrsponding flags.
 
 `nesvor register`: register stacks of slices using a pretrained SVoRT model.
 
 `nesvor sample-volume`: sample a volume from a trained NeSVoR model.
 
 `nesvor sample-slices`: simulate slices from a trained NeSVoR model.
+
+`nesvor segment`: fetal brain segmentation using a CNN.
+
+`nesvor correct-bias-field`: bias field correction using the N4 algorihtm.
 
 run `nesvor <command> -h` for a full list of parameters of a command.
 
@@ -169,6 +228,10 @@ nesvor reconstruct \
 ```
 This enables the separation of registration and reconstruction. That is, you may first run `register` to perform motion correction, and then use `reconstruct` to reconstruct a volume from a set of motion-corrected slices.
 
+#### Deformable NeSVoR
+
+NeSVoR can now reconstruct data with deformable (non-rigid) motion! To enable deformable motion, use the flag `--deformable`
+
 ### Registration
 `register` takes mutiple stacks of slices as inputs, performs motion correction, and then saves the motion-corrected slices to a folder.
 ```
@@ -183,6 +246,8 @@ nesvor register \
 - `svort-stack`: only apply stack transformations of SVoRT;
 - `stack`: stack-to-stack rigid registration;
 - `none`: no registration.
+
+Note: SVoRT can only be used for registering fetal brain images withou backgound.
 
 ### Sample Volume
 Upon training a NeSVoR model with the `reconstruct` command, you can sample a volume at arbitrary resolutions with the `sample-volume` command.
@@ -202,6 +267,24 @@ nesvor sample-slices \
 --simulated-slices <path-to-save-simulated-slices>
 ```
 For example, after running `reconstruct`, you can use `sample-slices` to simulate slices at the motion-corrected locations and evaluate the reconstruction results by comparing the input slices and the simulated slices. 
+
+### Brain Segmentation 
+We integrate a deep learning based fetal brain segmentation model ([MONAIfbs](https://github.com/gift-surg/MONAIfbs)) into our pipeline. Check out their [repo](https://github.com/gift-surg/MONAIfbs) and [paper](https://arxiv.org/abs/2103.13314) for details. You may perform brain segmentation in the `reconstruct` command or using the `segment` command.
+```
+nesvor segment \
+--input-stacks stack-1.nii.gz ... stack-N.nii.gz \
+--output-stack-masks mask-1.nii.gz ... mask-N.nii.gz \
+```
+
+### Bias Field Correction
+We also provide a wrapper of [the N4 algorithm in SimpleITK](https://simpleitk.readthedocs.io/en/master/link_N4BiasFieldCorrection_docs.html) for bias field correction.
+```
+nesvor correct-bias-field \
+--input-stacks stack-1.nii.gz ... stack-N.nii.gz \
+--stack-masks mask-1.nii.gz ... mask-N.nii.gz \
+--output-corrected-stacks corrected-stack-1.nii.gz ... corrected-stack-N.nii.gz
+```
+
 
 <!-- ## Resources -->
 

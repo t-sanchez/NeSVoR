@@ -5,12 +5,20 @@ from ..transform import RigidTransform
 from ..utils import ncc_loss, gaussian_blur, meshgrid
 import numpy as np
 import types
+from typing import Dict, Any, Tuple, Sequence
 
 
 class Registration(nn.Module):
     def __init__(
-        self, num_levels, num_steps, step_size, max_iter, optimizer, loss, auto_grad
-    ):
+        self,
+        num_levels: int,
+        num_steps: int,
+        step_size: float,
+        max_iter: int,
+        optimizer: Dict[str, Any],
+        loss,
+        auto_grad: bool,
+    ) -> None:
         super().__init__()
         self.num_levels = num_levels
         self.current_level = self.num_levels - 1
@@ -18,7 +26,9 @@ class Registration(nn.Module):
         self.step_sizes = [step_size * 2**level for level in range(num_levels)]
         self.max_iter = max_iter
         self.auto_grad = auto_grad
-        self._degree2rad = None
+        self._degree2rad = torch.tensor(
+            [np.pi / 180, np.pi / 180, np.pi / 180, 1, 1, 1],
+        ).view(1, 6)
 
         # init loss
         if isinstance(loss, dict):
@@ -47,25 +57,13 @@ class Registration(nn.Module):
                 optimizer["momentum"] = 0
         self.optimizer = optimizer
 
-    def degree2rad(self, theta):
-        if self._degree2rad is None:
-            self._degree2rad = torch.tensor(
-                [np.pi / 180, np.pi / 180, np.pi / 180, 1, 1, 1],
-                device=theta.device,
-                dtype=theta.dtype,
-            ).view(1, 6)
+    def degree2rad(self, theta: torch.Tensor) -> torch.Tensor:
         return theta * self._degree2rad
 
-    def rad2degree(self, theta):
-        if self._degree2rad is None:
-            self._degree2rad = torch.tensor(
-                [np.pi / 180, np.pi / 180, np.pi / 180, 1, 1, 1],
-                device=theta.device,
-                dtype=theta.dtype,
-            ).view(1, 6)
+    def rad2degree(self, theta: torch.Tensor) -> torch.Tensor:
         return theta / self._degree2rad
 
-    def clean_optimizer_state(self):
+    def clean_optimizer_state(self) -> None:
         if self.optimizer["name"] == "gd":
             if "buf" in self.optimizer:
                 self.optimizer.pop("buf")
@@ -73,7 +71,14 @@ class Registration(nn.Module):
     def prepare(self, *args, **kwargs):
         return
 
-    def forward(self, theta, source, target, params):
+    def forward(
+        self,
+        theta: torch.Tensor,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        params: Dict[str, Any],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self._degree2rad = self._degree2rad.to(device=theta.device, dtype=theta.dtype)
         self.prepare(theta, source, target, params)
         theta0 = theta.clone()
         theta = self.rad2degree(theta.detach()).requires_grad_(self.auto_grad)
@@ -83,10 +88,14 @@ class Registration(nn.Module):
             dtheta = self.degree2rad(theta) - theta0
         return theta0 + dtheta, loss
 
-    def update_level(self, theta, source, target):
+    def update_level(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError("")
 
-    def multilevel(self, theta, source, target):
+    def multilevel(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         for level in range(self.num_levels - 1, -1, -1):
             self.current_level = level
             source_new, target_new = self.update_level(theta, source, target)
@@ -101,13 +110,26 @@ class Registration(nn.Module):
 
         return theta, loss
 
-    def singlelevel(self, theta, source, target, num_steps, step_size):
+    def singlelevel(
+        self,
+        theta: torch.Tensor,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        num_steps: int,
+        step_size: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         for _ in range(num_steps):
             theta, loss = self.step(theta, source, target, step_size)
             step_size /= 2
         return theta, loss
 
-    def step(self, theta, source, target, step_size):
+    def step(
+        self,
+        theta: torch.Tensor,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        step_size: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         self.activate_idx = torch.ones(
             theta.shape[0], device=theta.device, dtype=torch.bool
         )
@@ -129,7 +151,9 @@ class Registration(nn.Module):
 
         return theta, loss_all.detach()
 
-    def activate_set(self, theta, source, target):
+    def activate_set(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         theta = theta[self.activate_idx]
         if source.shape[0] > 1:
             source = source[self.activate_idx]
@@ -137,7 +161,13 @@ class Registration(nn.Module):
             target = target[self.activate_idx]
         return theta, source, target
 
-    def grad(self, theta, source, target, step_size):
+    def grad(
+        self,
+        theta: torch.Tensor,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        step_size: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         loss = self.evaluate(theta, source, target)
         if self.auto_grad:
             grad = torch.autograd.grad([loss.sum()], [theta])[0]
@@ -154,16 +184,20 @@ class Registration(nn.Module):
                 grad[:, j] = loss1 - loss2
         return loss, grad
 
-    def warp(self, theta, source, target):
+    def warp(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError("warp")
 
-    def evaluate(self, theta, source, target):
+    def evaluate(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
         warpped, target = self.warp(theta, source, target)
         loss = self.loss(warpped, target)
         loss = loss.view(loss.shape[0], -1).mean(1)
         return loss
 
-    def optimizer_step(self, grad):
+    def optimizer_step(self, grad: torch.Tensor) -> torch.Tensor:
         if self.optimizer["name"] == "gd":
             step = self.gd_step(grad)
         else:
@@ -171,7 +205,7 @@ class Registration(nn.Module):
         step = step / (torch.linalg.norm(step, dim=-1, keepdim=True) + 1e-6)
         return step
 
-    def gd_step(self, grad):
+    def gd_step(self, grad: torch.Tensor) -> torch.Tensor:
         if self.optimizer["momentum"]:
             if "buf" not in self.optimizer:
                 self.optimizer["buf"] = grad.clone()
@@ -188,27 +222,41 @@ class Registration(nn.Module):
 
 class VVR(Registration):
     def __init__(
-        self, num_levels, num_steps, step_size, max_iter, optimizer, loss, auto_grad
-    ):
+        self,
+        num_levels: int,
+        num_steps: int,
+        step_size: float,
+        max_iter: int,
+        optimizer: Dict,
+        loss,
+        auto_grad: bool,
+    ) -> None:
         super().__init__(
             num_levels, num_steps, step_size, max_iter, optimizer, loss, auto_grad
         )
-        self.theta_t = None
-        self._grid = None
-        self._grid_scale = None
-        self._target_flat = None
+        # self.theta_t = None
+        # self._grid = None
+        # self._grid_scale = None
+        # self._target_flat = None
         self.trans_first = True
 
-    def update_level(self, theta, source, target):
-        sigma = [0.5 * (2**self.current_level) / res for res in self.relative_res]
-        source = gaussian_blur(source, sigma, truncated=4.0)
-        target = gaussian_blur(target, sigma, truncated=4.0)
+    def update_level(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        sigma_source = [
+            0.5 * (2**self.current_level) / res for res in self.relative_res_source
+        ]
+        source = gaussian_blur(source, sigma_source, truncated=4.0)
+        sigma_target = [
+            0.5 * (2**self.current_level) / res for res in self.relative_res_target
+        ]
+        target = gaussian_blur(target, sigma_target, truncated=4.0)
 
         source = resample(
-            source, self.relative_res[::-1], [2**self.current_level] * 3
+            source, self.relative_res_source[::-1], [2**self.current_level] * 3
         )  # self.resample(source)
         target = resample(
-            target, self.relative_res[::-1], [2**self.current_level] * 3
+            target, self.relative_res_target[::-1], [2**self.current_level] * 3
         )  # self.resample(target)
 
         res_new = self.res * (2**self.current_level)
@@ -237,7 +285,9 @@ class VVR(Registration):
 
         return source, target
 
-    def warp(self, theta, source, target):
+    def warp(
+        self, theta: torch.Tensor, source: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         transforms = (
             RigidTransform(self.degree2rad(theta), trans_first=self.trans_first)
             .inv()
@@ -254,17 +304,37 @@ class VVR(Registration):
         return warpped.view(1, 1, -1), self._target_flat.view(1, 1, -1)
 
     def prepare(self, theta, source, target, params):
-        res = [params["s_thick"], params["res_s"], params["res_s"]]
-        self.res = min(res)
-        self.relative_res = [r / self.res for r in res]
+        res_source = [
+            params["gap_source"],
+            params["res_y_source"],
+            params["res_x_source"],
+        ]
+        res_target = [
+            params["gap_target"],
+            params["res_y_target"],
+            params["res_x_target"],
+        ]
+        self.res = min(res_source + res_target)
+        self.relative_res_source = [r / self.res for r in res_source]
+        self.relative_res_target = [r / self.res for r in res_target]
 
-    def __call__(self, theta, source, target, params, transform_t, trans_first):
+    def __call__(
+        self,
+        theta: torch.Tensor,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        params: Dict[str, float],
+        transform_t: RigidTransform,
+        trans_first: bool,
+    ):
         self.theta_t = transform_t
         self.trans_first = trans_first
         return super().__call__(theta, source, target, params)
 
 
-def resample(x, res_xyz_old, res_xyz_new):
+def resample(
+    x: torch.Tensor, res_xyz_old: Sequence, res_xyz_new: Sequence
+) -> torch.Tensor:
     ndim = x.ndim - 2
     assert len(res_xyz_new) == len(res_xyz_old) == ndim
     grids = []

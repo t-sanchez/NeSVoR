@@ -7,3 +7,4 @@ __pretrained_svort = {
     "v1": "https://zenodo.org/record/7486938/files/checkpoint.pt?download=1",
     "v2": "https://zenodo.org/record/7486938/files/checkpoint_v2.pt?download=1",
 }
+__monaifbs = "https://zenodo.org/record/4282679/files/models.tar.gz?download=1"

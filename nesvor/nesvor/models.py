@@ -17,6 +17,7 @@ DS_LOSS = "MSE+logVar"
 B_REG = "biasReg"
 T_REG = "transReg"
 I_REG = "imageReg"
+D_REG = "deformReg"
 
 
 def build_encoding(**config):
@@ -69,36 +70,54 @@ def build_network(**config):
         raise ValueError("unknown dtype")
 
 
+def compute_resolution_nlevel(
+    bounding_box, coarsest_resolution, finest_resolution, level_scale, spatial_scaling
+):
+    base_resolution = (
+        (
+            (bounding_box[1] - bounding_box[0]).max()
+            * spatial_scaling
+            / coarsest_resolution
+        )
+        .ceil()
+        .int()
+        .item()
+    )
+    n_levels = (
+        (
+            torch.log2(
+                (bounding_box[1] - bounding_box[0]).max()
+                * spatial_scaling
+                / finest_resolution
+                / base_resolution
+            )
+            / log2(level_scale)
+            + 1
+        )
+        .ceil()
+        .int()
+        .item()
+    )
+    return base_resolution, n_levels
+
+
 class INR(nn.Module):
-    def __init__(self, bounding_box: torch.Tensor, args: Namespace) -> None:
+    def __init__(
+        self, bounding_box: torch.Tensor, args: Namespace, spatial_scaling: float = 1.0
+    ) -> None:
         super().__init__()
         if TYPE_CHECKING:
             self.bounding_box: torch.Tensor
         self.register_buffer("bounding_box", bounding_box)
         # hash grid encoding
-        base_resolution = (
-            (
-                (self.bounding_box[1] - self.bounding_box[0]).max()
-                / args.coarsest_resolution
-            )
-            .ceil()
-            .int()
-            .item()
+        base_resolution, n_levels = compute_resolution_nlevel(
+            self.bounding_box,
+            args.coarsest_resolution,
+            args.finest_resolution,
+            args.level_scale,
+            spatial_scaling,
         )
-        n_levels = (
-            (
-                torch.log2(
-                    (self.bounding_box[1] - self.bounding_box[0]).max()
-                    / args.finest_resolution
-                    / base_resolution
-                )
-                / log2(args.level_scale)
-                + 1
-            )
-            .ceil()
-            .int()
-            .item()
-        )
+
         self.encoding = build_encoding(
             n_input_dims=3,
             otype="HashGrid",
@@ -174,6 +193,70 @@ class INR(nn.Module):
         return xyz
 
 
+class DeformNet(nn.Module):
+    def __init__(
+        self, bounding_box: torch.Tensor, args: Namespace, spatial_scaling: float = 1.0
+    ) -> None:
+        super().__init__()
+        if TYPE_CHECKING:
+            self.bounding_box: torch.Tensor
+        self.register_buffer("bounding_box", bounding_box)
+        # hash grid encoding
+        base_resolution, n_levels = compute_resolution_nlevel(
+            bounding_box,
+            args.coarsest_resolution_deform,
+            args.finest_resolution_deform,
+            args.level_scale_deform,
+            spatial_scaling,
+        )
+        level_scale = args.level_scale_deform
+
+        self.encoding = build_encoding(
+            n_input_dims=3,
+            otype="HashGrid",
+            n_levels=n_levels,
+            n_features_per_level=args.n_features_per_level_deform,
+            log2_hashmap_size=args.log2_hashmap_size,
+            base_resolution=base_resolution,
+            per_level_scale=level_scale,
+            dtype=args.dtype,
+            interpolation="Smoothstep",
+        )
+        self.deform_net = build_network(
+            n_input_dims=n_levels * args.n_features_per_level_deform
+            + args.n_features_deform,
+            n_output_dims=3,
+            activation="Tanh",
+            output_activation="None",
+            n_neurons=args.width,
+            n_hidden_layers=2,
+            dtype=torch.float32,
+        )
+        for p in self.deform_net.parameters():
+            torch.nn.init.uniform_(p, a=-1e-4, b=1e-4)
+        logging.debug(
+            "hyperparameters for hash grid encoding (deform net): "
+            + "lowest_grid_size=%d, highest_grid_size=%d, scale=%1.2f, n_levels=%d",
+            base_resolution,
+            int(base_resolution * level_scale ** (n_levels - 1)),
+            level_scale,
+            n_levels,
+        )
+
+    def forward(self, x: torch.Tensor, e: torch.Tensor):
+        x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
+        x_shape = x.shape
+        x = x.view(-1, x.shape[-1])
+        pe = self.encoding(x)
+        inputs = torch.cat((pe, e.reshape(-1, e.shape[-1])), -1)
+        outputs = self.deform_net(inputs) + x
+        outputs = (
+            outputs * (self.bounding_box[1] - self.bounding_box[0])
+            + self.bounding_box[0]
+        )
+        return outputs.view(x_shape)
+
+
 class NeSVoR(nn.Module):
     def __init__(
         self,
@@ -181,9 +264,11 @@ class NeSVoR(nn.Module):
         resolution: torch.Tensor,
         v_mean: float,
         bounding_box: torch.Tensor,
+        spatial_scaling: float,
         args: Namespace,
     ) -> None:
         super().__init__()
+        self.spatial_scaling = spatial_scaling
         self.args = args
         self.n_slices = 0
         self.trans_first = True
@@ -231,8 +316,13 @@ class NeSVoR(nn.Module):
             self.log_var_slice = nn.Parameter(
                 torch.zeros(self.n_slices, dtype=torch.float32)
             )
+        if self.args.deformable:
+            self.deform_embedding = nn.Embedding(
+                self.n_slices, self.args.n_features_deform
+            )
+            self.deform_net = DeformNet(bounding_box, self.args, self.spatial_scaling)
         # INR
-        self.inr = INR(bounding_box, self.args)
+        self.inr = INR(bounding_box, self.args, self.spatial_scaling)
         # sigma net
         if not self.args.no_pixel_variance:
             self.sigma_net = build_network(
@@ -276,6 +366,13 @@ class NeSVoR(nn.Module):
         xyz = ax_transform_points(
             t, xyz[:, None] + xyz_psf * psf_sigma, self.trans_first
         )
+
+        # deform
+        xyz_ori = xyz
+        if self.args.deformable:
+            de = self.deform_embedding(slice_idx)[:, None].expand(-1, n_samples, -1)
+            xyz = self.deform_net(xyz, de)
+
         # inputs
         if self.args.n_features_slice:
             se = self.slice_embedding(slice_idx)[:, None].expand(-1, n_samples, -1)
@@ -321,8 +418,12 @@ class NeSVoR(nn.Module):
             losses[T_REG] = self.trans_loss(trans_first=self.trans_first)
         if self.args.n_levels_bias:
             losses[B_REG] = log_bias.mean() ** 2
+        if self.args.deformable:
+            losses[D_REG] = deform_reg_autodiff(self.deform_net, xyz_ori, de)
         # image regularization
-        losses[I_REG] = self.image_regularization(density, xyz, self.delta)
+        losses[I_REG] = self.image_regularization(
+            density, xyz * self.spatial_scaling, self.delta
+        )
 
         return losses
 
@@ -360,7 +461,7 @@ class NeSVoR(nn.Module):
         err = y.inv().compose(x).axisangle(trans_first=trans_first)
         loss_R = torch.mean(err[:, :3] ** 2)
         loss_T = torch.mean(err[:, 3:] ** 2)
-        return loss_R + 1e-3 * loss_T
+        return loss_R + 1e-3 * self.spatial_scaling * self.spatial_scaling * loss_T
 
 
 def tv_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
@@ -377,8 +478,44 @@ def edge_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
     return delta * ((1 + dd2_dx2).sqrt().mean() - 1)
 
 
+""""
+def edge_reg_autodiff(density: torch.Tensor, xyz: torch.Tensor, delta: float):
+    grad = torch.autograd.grad((density.sum(),), (xyz,), create_graph=True)[0]
+    grad2 = (grad**2).sum(-1)
+    print(grad.shape, grad2.shape)
+    return (delta * delta + grad2).sqrt().mean() - delta
+"""
+
+
 def l2_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
     d_density = density - torch.flip(density, (1,))
     dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
     dd2_dx2 = d_density**2 / dx2
     return dd2_dx2.mean()
+
+
+def deform_reg(out: torch.Tensor, xyz: torch.Tensor):
+    out = out - xyz
+    d_out2 = ((out - torch.flip(out, (1,))) ** 2).sum(-1) + 1e-6
+    dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
+    dd_dx = d_out2.sqrt() / dx2.sqrt()
+    return F.smooth_l1_loss(dd_dx, torch.zeros_like(dd_dx).detach(), beta=1e-3)
+
+
+def deform_reg_autodiff(model, x, e):
+    n_sample = 4
+    x = x[:, :n_sample].flatten(0, 1).detach()
+    e = e[:, :n_sample].flatten(0, 1).detach()
+
+    x.requires_grad_()
+    outputs = model(x, e)
+    grads = []
+    out_sum = []
+    for i in range(3):
+        out_sum.append(outputs[:, i].sum())
+        grads.append(torch.autograd.grad((out_sum[-1],), (x,), create_graph=True)[0])
+    jacobian = torch.stack(grads, -1)
+    jtj = torch.matmul(jacobian, jacobian.transpose(-1, -2))
+    I = torch.eye(3, dtype=jacobian.dtype, device=jacobian.device).unsqueeze(0)
+    sq_residual = ((jtj - I) ** 2).sum((-2, -1))
+    return torch.nan_to_num(sq_residual, 0.0, 0.0, 0.0).mean()
