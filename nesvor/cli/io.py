@@ -2,7 +2,7 @@ import torch
 from typing import Dict, Tuple, Any
 from argparse import Namespace
 from ..image import Volume, save_slices, load_slices, load_stack
-from ..nesvor.models import INR
+from ..nesvor.models import INR, NeSVoR
 from ..utils import merge_args
 
 
@@ -22,9 +22,17 @@ def inputs(args: Namespace) -> Tuple[Dict, Namespace]:
     if getattr(args, "input_slices", None) is not None:
         input_dict["input_slices"] = load_slices(args.input_slices, args.device)
     if getattr(args, "input_model", None) is not None:
+        # Saving and loading a NeSVoR model rather than just the INR.
         cp = torch.load(args.input_model, map_location=args.device)
-        input_dict["model"] = INR(cp["model"]["bounding_box"], cp["args"])
-        input_dict["model"].load_state_dict(cp["model"])
+        nesvor = NeSVoR(
+        transformation=cp["dataset_info"]["transformation"],
+        resolution=cp["dataset_info"]["resolution"],
+        v_mean=cp["dataset_info"]["mean"],
+        bounding_box= cp["dataset_info"]["bounding_box"],
+        args=cp["args"]
+        )
+        nesvor.load_state_dict(cp["model"])
+        input_dict["model"] = nesvor #INR(cp["model"]["bounding_box"], cp["args"])
         input_dict["mask"] = cp["mask"]
         args = merge_args(cp["args"], args)
     return input_dict, args
@@ -41,6 +49,7 @@ def outputs(data: Dict, args: Namespace) -> None:
                 "model": data["output_model"].state_dict(),
                 "mask": data["mask"],
                 "args": args,
+                "dataset_info": data["dataset_info"],
             },
             args.output_model,
         )
@@ -48,12 +57,29 @@ def outputs(data: Dict, args: Namespace) -> None:
         save_slices(args.output_slices, data["output_slices"])
     if getattr(args, "simulated_slices", None) and "simulated_slices" in data:
         save_slices(args.simulated_slices, data["simulated_slices"])
-
+    # Added on my side: saving the invidiual slices, their sigma, variance and variance of sigma.
+    if getattr(args, "simulated_sigmas", None) and "simulated_sigmas" in data:
+        import os
+        os.makedirs(args.simulated_sigmas, exist_ok=True)
+        for i, image in enumerate(data["simulated_sigmas"]):
+            image.save(os.path.join(args.simulated_sigmas, f"{i}.nii.gz"), True)
+            image.save_select(os.path.join(args.simulated_sigmas, f"{i}_sigma.nii.gz"), True,"sigma")
+            image.save_select(os.path.join(args.simulated_sigmas, f"{i}_var.nii.gz"), True,"image_var")
+            image.save_select(os.path.join(args.simulated_sigmas, f"{i}_sigma_var.nii.gz"), True,"sigma_var")
 
 def load_model(args: Namespace) -> Tuple[INR, Volume, Namespace]:
+    # Load NeSVoR model instead of an INR
     cp = torch.load(args.input_model, map_location=args.device)
-    inr = INR(cp["model"]["bounding_box"], cp["args"])
-    inr.load_state_dict(cp["model"])
+    nesvor = NeSVoR(
+        transformation=cp["dataset_info"]["transformation"],
+        resolution=cp["dataset_info"]["resolution"],
+        v_mean=cp["dataset_info"]["mean"],
+        bounding_box= cp["dataset_info"]["bounding_box"],
+        args=cp["args"]
+        )
+    nesvor.load_state_dict(cp["model"])
+    #inr = INR(cp["model"]["bounding_box"], cp["args"])
+    #inr.load_state_dict(cp["model"])
     mask = cp["mask"]
     args = merge_args(cp["args"], args)
-    return inr, mask, args
+    return nesvor.inr, mask, args

@@ -102,7 +102,6 @@ class Dataset(object):
                 gaussian_blur(mask, (resolution_max / resolution_min).item(), 3)
                 > mask_threshold
             )[0, 0]
-            print(mask.shape)
 
             xyz_c = xyz_min + (shape_xyz - 1) / 2 * resolution_min
             return Volume(
@@ -232,4 +231,11 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         output_slice = slices[i].clone()
         output_slice.transformation = transformation[i]
         output_slices.append(output_slice)
-    return model.inr, output_slices, mask
+    # Returning not just the inr, but the nesvor model
+    ds = {
+        "transformation":dataset.transformation,
+        "resolution": dataset.resolution,
+        "mean": dataset.mean,
+        "bounding_box":dataset.bounding_box,
+    }
+    return model, output_slices, mask, ds

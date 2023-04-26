@@ -216,6 +216,7 @@ def build_parser_outputs(
     output_volume=False,
     output_slices=False,
     simulate_slices=False,
+    simulate_sigmas=True,
     output_model=False,
     **kwargs,
 ) -> argparse.ArgumentParser:
@@ -270,6 +271,13 @@ def build_parser_outputs(
             required=simulate_slices == "required",
             type=str,
             help="Folder to save the simulated slices from the reconstructed volume",
+        )
+    if simulate_sigmas:
+        parser.add_argument(
+            "--simulated-sigmas",
+            required=simulate_sigmas == "required",
+            type=str,
+            help="Folder to save the simulated slices and uncertainties from the reconstructed volume",
         )
     # output model
     if output_model:

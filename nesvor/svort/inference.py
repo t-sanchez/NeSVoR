@@ -452,7 +452,6 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
             crop_idx,
             s_thick,
         ) = parse_data(dataset, res_s)
-
     if svort:
         if isinstance(model, SVoRT):
             # print("old svort")
@@ -528,7 +527,6 @@ def run_svort(dataset, model, svort, vvr, force_vvr):
         stack.slices /= torch.quantile(stack.slices[stack.mask], 0.99)
         slices.extend(stack[idx_nonempty])
     dataset = slices
-
     return dataset
 
 

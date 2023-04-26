@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 from ..image import Stack, Slice
 from ..svort.inference import svort_predict
 from ..nesvor.train import train
-from ..nesvor.sample import sample_volume, sample_slices
+from ..nesvor.sample import sample_volume, sample_slices, sample_sigmas
 from .io import outputs, inputs
 from ..utils import makedirs, log_args
 
@@ -105,11 +105,15 @@ class Reconstruct(Command):
             slices = input_dict["input_slices"]
         else:
             raise ValueError("No data found!")
-        self.new_timer("Reconsturction")
-        model, output_slices, mask = train(slices, args)
+
+        self.new_timer("Reconstruction")
+        model, output_slices, mask, ds = train(slices, args)
         self.new_timer("Results saving")
-        output_volume = sample_volume(model, mask, args)
-        simulated_slices = sample_slices(model, output_slices, mask, args)
+        # Added on my side: Sampling the sigmas in addition to the slices and volume
+        output_volume = sample_volume(model.inr, mask, args)
+        simulated_slices = sample_slices(model.inr, output_slices, mask, args)
+        simulated_sigmas = sample_sigmas(model, output_slices, mask, args)
+
         outputs(
             {
                 "output_volume": output_volume,
@@ -117,6 +121,8 @@ class Reconstruct(Command):
                 "output_model": model,
                 "output_slices": output_slices,
                 "simulated_slices": simulated_slices,
+                "simulated_sigmas": simulated_sigmas,
+                "dataset_info": ds,
             },
             args,
         )

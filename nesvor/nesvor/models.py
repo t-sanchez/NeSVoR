@@ -137,6 +137,7 @@ class NeSVoR(nn.Module):
         args: Namespace,
     ) -> None:
         super().__init__()
+        logging.info("This is a test")
         self.args = args
         self.n_slices = 0
         self.trans_first = True
@@ -277,6 +278,8 @@ class NeSVoR(nn.Module):
         if self.args.pixel_variance:
             # var = (bias_detach ** 2) * var
             # var = (c.detach() ** 2  / n_samples) * var.mean(-1)
+            # I don't understand why they use bias_detach and c.detach() here
+            
             var = (bias_detach * psf * var).mean(-1)
             var = c.detach() * var
             var = var**2
@@ -301,7 +304,6 @@ class NeSVoR(nn.Module):
         x: torch.Tensor,
         se: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-
         density, pe, z = self.inr(x)
         prefix_shape = density.shape
         results = {"density": density}
@@ -317,11 +319,10 @@ class NeSVoR(nn.Module):
             results["log_bias"] = self.b_net(torch.cat(zs + [pe_bias], -1)).view(
                 prefix_shape
             )
-
+        
         if self.args.pixel_variance:
             zs.append(z[..., 1:])
             results["log_var"] = self.sigma_net(torch.cat(zs, -1)).view(prefix_shape)
-
         return results
 
     def trans_loss(self, trans_first: bool = True) -> torch.Tensor:
@@ -332,6 +333,27 @@ class NeSVoR(nn.Module):
         loss_T = torch.mean(err[:, 3:] ** 2)
         return loss_R + 1e-3 * loss_T
 
+    def sample_batch(
+        self,
+        xyz: torch.Tensor,
+        transformation: Optional[RigidTransform],
+        psf_sigma: Union[float, torch.Tensor],
+        n_samples: int,
+    ) -> torch.Tensor:
+        if n_samples > 1:
+            if isinstance(psf_sigma, torch.Tensor):
+                psf_sigma = psf_sigma.view(-1, 1, 3)
+            xyz_psf = torch.randn(
+                xyz.shape[0], n_samples, 3, dtype=xyz.dtype, device=xyz.device
+            )
+            xyz = xyz[:, None] + xyz_psf * psf_sigma
+        else:
+            xyz = xyz[:, None]
+        if transformation is not None:
+            trans_first = transformation.trans_first
+            mat = transformation.matrix(trans_first)
+            xyz = mat_transform_points(mat[:, None], xyz, trans_first)
+        return xyz
 
 def tv_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
     d_density = density - torch.flip(density, (1,))

@@ -43,7 +43,9 @@ class Image(object):
 
     def _clone_image(self, zero: bool = False) -> Dict:
         return {
-            "image": torch.zeros_like(self.image) if zero else self.image.clone(),
+            "image": torch.zeros_like(self.image)
+            if zero
+            else self.image.clone(),
             "mask": torch.zeros_like(self.mask) if zero else self.mask.clone(),
             "transformation": self.transformation.clone(),
             "resolution_x": float(self.resolution_x),
@@ -76,9 +78,35 @@ class Image(object):
             output_volume = self.image
         save_nii_volume(path, output_volume, affine)
 
+    def save_select(self, path: str, masked=True, select=None) -> None:
+        if select is None:
+            self.save(path, masked)
+        else: 
+            if select == "sigma":
+                im = self.sigma
+            elif select == "image_var":
+                im = self.image_var
+            elif select == "sigma_var":
+                im = self.sigma_var
+            else:
+                raise ValueError("select must be in ['sigma','image_var', 'sigma_var']")
+        affine = transformation2affine(
+            im,
+            self.transformation,
+            float(self.resolution_x),
+            float(self.resolution_y),
+            float(self.resolution_z),
+        )
+        if masked:
+            output_volume = im * self.mask.to(im.dtype)
+        else:
+            output_volume = im
+        save_nii_volume(path, output_volume, affine)
     @property
     def xyz_masked(self) -> torch.Tensor:
-        return transform_points(self.transformation, self.xyz_masked_untransformed)
+        return transform_points(
+            self.transformation, self.xyz_masked_untransformed
+        )
 
     @property
     def xyz_masked_untransformed(self) -> torch.Tensor:
@@ -107,7 +135,12 @@ class Slice(Image):
         slice_idx: Optional[int] = None,
     ) -> None:
         super().__init__(
-            image, mask, transformation, resolution_x, resolution_y, resolution_z
+            image,
+            mask,
+            transformation,
+            resolution_x,
+            resolution_y,
+            resolution_z,
         )
         self.stack_idx = stack_idx
         self.slice_idx = slice_idx
@@ -152,7 +185,6 @@ class Volume(Image):
         xyz = self.xyz_masked
         # new rotation
         xyz = torch.matmul(torch.inverse(R), xyz.view(-1, 3, 1))[..., 0]
-
         xyz_min = xyz.amin(0) - resolution_new * 10
         xyz_max = xyz.amax(0) + resolution_new * 10
         shape_xyz = ((xyz_max - xyz_min) / resolution_new).ceil().long()
@@ -202,7 +234,9 @@ class Stack(object):
                 (slices.shape[0], 6), dtype=torch.float32, device=slices.device
             )
             t[:, -1] = (
-                torch.arange(slices.shape[0], dtype=torch.float32, device=slices.device)
+                torch.arange(
+                    slices.shape[0], dtype=torch.float32, device=slices.device
+                )
                 - slices.shape[0] / 2
             ) * gap
             transformation = RigidTransform(t)
@@ -253,7 +287,9 @@ def save_nii_volume(
     volume: Union[torch.Tensor, np.ndarray],
     affine: Optional[Union[torch.Tensor, np.ndarray]],
 ) -> None:
-    assert len(volume.shape) == 3 or (len(volume.shape) == 4 and volume.shape[1] == 1)
+    assert len(volume.shape) == 3 or (
+        len(volume.shape) == 4 and volume.shape[1] == 1
+    )
     if len(volume.shape) == 4:
         volume = volume.squeeze(1)
     if isinstance(volume, torch.Tensor):
@@ -334,7 +370,12 @@ def load_stack(
         mask, resolutions_m, affine_m = load_nii_volume(path_mask)
         mask = mask > 0
         if not compare_resolution_affine(
-            resolutions, affine, resolutions_m, affine_m, slices.shape, mask.shape
+            resolutions,
+            affine,
+            resolutions_m,
+            affine_m,
+            slices.shape,
+            mask.shape,
         ):
             raise Exception(
                 "Error: the sizes/resolutions/affine transformations of the input stack and stack mask do not match!"
