@@ -29,7 +29,6 @@ def sample_points(model: INR, xyz: torch.Tensor, args: Namespace) -> torch.Tenso
                 args.n_inference_samples if args.output_psf else 0,
             )
             v_b = model(xyz_batch, False).mean(-1)
-            print(f"DOING INFERENCE; SAMPLING POINT of size {v_b.shape}")
             v[i : i + batch_size] = v_b
     return v.view(shape)
 
