@@ -137,7 +137,6 @@ class NeSVoR(nn.Module):
         args: Namespace,
     ) -> None:
         super().__init__()
-        logging.info("This is a test")
         self.args = args
         self.n_slices = 0
         self.trans_first = True
