@@ -88,19 +88,14 @@ class Dataset(object):
             kji = ((xyz - xyz_min) / resolution_min).round().long()
 
             mask = torch.bincount(
-                kji[..., 0]
-                + shape[2] * kji[..., 1]
-                + shape[2] * shape[1] * kji[..., 2],
+                kji[..., 0] + shape[2] * kji[..., 1] + shape[2] * shape[1] * kji[..., 2],
                 minlength=shape[0] * shape[1] * shape[2],
             )
             mask = mask.view((1, 1) + shape).float()
-            mask_threshold = (
-                1.0 * resolution_min**3 / self.resolution.log().mean().exp() ** 3
-            )
+            mask_threshold = 1.0 * resolution_min**3 / self.resolution.log().mean().exp() ** 3
             mask_threshold *= mask.sum() / (mask > 0).sum()
             mask = (
-                gaussian_blur(mask, (resolution_max / resolution_min).item(), 3)
-                > mask_threshold
+                gaussian_blur(mask, (resolution_max / resolution_min).item(), 3) > mask_threshold
             )[0, 0]
 
             xyz_c = xyz_min + (shape_xyz - 1) / 2 * resolution_min
@@ -233,9 +228,9 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         output_slices.append(output_slice)
     # Returning not just the inr, but the nesvor model
     ds = {
-        "transformation":dataset.transformation,
+        "transformation": dataset.transformation,
         "resolution": dataset.resolution,
         "mean": dataset.mean,
-        "bounding_box":dataset.bounding_box,
+        "bounding_box": dataset.bounding_box,
     }
     return model, output_slices, mask, ds

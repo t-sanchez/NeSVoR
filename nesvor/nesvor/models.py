@@ -111,6 +111,7 @@ class INR(nn.Module):
         psf_sigma: Union[float, torch.Tensor],
         n_samples: int,
     ) -> torch.Tensor:
+
         if n_samples > 1:
             if isinstance(psf_sigma, torch.Tensor):
                 psf_sigma = psf_sigma.view(-1, 1, 3)

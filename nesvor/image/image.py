@@ -43,9 +43,7 @@ class Image(object):
 
     def _clone_image(self, zero: bool = False) -> Dict:
         return {
-            "image": torch.zeros_like(self.image)
-            if zero
-            else self.image.clone(),
+            "image": torch.zeros_like(self.image) if zero else self.image.clone(),
             "mask": torch.zeros_like(self.mask) if zero else self.mask.clone(),
             "transformation": self.transformation.clone(),
             "resolution_x": float(self.resolution_x),
@@ -81,7 +79,7 @@ class Image(object):
     def save_select(self, path: str, masked=True, select=None) -> None:
         if select is None:
             self.save(path, masked)
-        else: 
+        else:
             if select == "sigma":
                 im = self.sigma
             elif select == "image_var":
@@ -102,11 +100,10 @@ class Image(object):
         else:
             output_volume = im
         save_nii_volume(path, output_volume, affine)
+
     @property
     def xyz_masked(self) -> torch.Tensor:
-        return transform_points(
-            self.transformation, self.xyz_masked_untransformed
-        )
+        return transform_points(self.transformation, self.xyz_masked_untransformed)
 
     @property
     def xyz_masked_untransformed(self) -> torch.Tensor:
@@ -133,6 +130,7 @@ class Slice(Image):
         resolution_z: Union[float, torch.Tensor] = 1.0,
         stack_idx: Optional[int] = None,
         slice_idx: Optional[int] = None,
+        name: Optional[str] = None,
     ) -> None:
         super().__init__(
             image,
@@ -144,11 +142,13 @@ class Slice(Image):
         )
         self.stack_idx = stack_idx
         self.slice_idx = slice_idx
+        self.name = name
 
     def clone(self, zero: bool = False) -> Slice:
         return Slice(
             stack_idx=self.stack_idx,
             slice_idx=self.slice_idx,
+            name=self.name,
             **self._clone_image(zero),
         )
 
@@ -169,7 +169,6 @@ class Volume(Image):
         resolution_new: Optional[Union[float, torch.Tensor]],
         transformation_new: Optional[RigidTransform],
     ) -> Volume:
-
         if transformation_new is None:
             transformation_new = self.transformation
         R = transformation_new.matrix()[0, :3, :3]
@@ -178,9 +177,7 @@ class Volume(Image):
         if resolution_new is None:
             resolution_new = self.resolution_xyz
         elif isinstance(resolution_new, float) or resolution_new.numel == 1:
-            resolution_new = torch.tensor(
-                [resolution_new] * 3, dtype=dtype, device=device
-            )
+            resolution_new = torch.tensor([resolution_new] * 3, dtype=dtype, device=device)
 
         xyz = self.xyz_masked
         # new rotation
@@ -223,6 +220,7 @@ class Stack(object):
         resolution_y: float = 1.0,
         thickness: float = 1.0,
         gap: float = 1.0,
+        name: Optional[str] = None,
     ) -> None:
         self.slices = slices
         if mask is None:
@@ -230,26 +228,21 @@ class Stack(object):
             mask = torch.ones_like(slices, dtype=torch.bool)
         self.mask = mask
         if transformation is None:
-            t = torch.zeros(
-                (slices.shape[0], 6), dtype=torch.float32, device=slices.device
-            )
+            t = torch.zeros((slices.shape[0], 6), dtype=torch.float32, device=slices.device)
             t[:, -1] = (
-                torch.arange(
-                    slices.shape[0], dtype=torch.float32, device=slices.device
-                )
+                torch.arange(slices.shape[0], dtype=torch.float32, device=slices.device)
                 - slices.shape[0] / 2
             ) * gap
             transformation = RigidTransform(t)
         self.transformation = transformation
         if score is None:
-            score = torch.ones(
-                slices.shape[0], dtype=torch.float32, device=slices.device
-            )
+            score = torch.ones(slices.shape[0], dtype=torch.float32, device=slices.device)
         self.score = score
         self.resolution_x = resolution_x
         self.resolution_y = resolution_y
         self.thickness = thickness
         self.gap = gap
+        self.name = name
 
     def __len__(self) -> int:
         return self.slices.shape[0]
@@ -267,6 +260,7 @@ class Stack(object):
                 self.resolution_x,
                 self.resolution_y,
                 self.thickness,
+                name=self.name,
             )
         else:
             return [
@@ -277,6 +271,7 @@ class Stack(object):
                     self.resolution_x,
                     self.resolution_y,
                     self.thickness,
+                    name=self.name,
                 )
                 for i in range(len(transformation))
             ]
@@ -287,9 +282,7 @@ def save_nii_volume(
     volume: Union[torch.Tensor, np.ndarray],
     affine: Optional[Union[torch.Tensor, np.ndarray]],
 ) -> None:
-    assert len(volume.shape) == 3 or (
-        len(volume.shape) == 4 and volume.shape[1] == 1
-    )
+    assert len(volume.shape) == 3 or (len(volume.shape) == 4 and volume.shape[1] == 1)
     if len(volume.shape) == 4:
         volume = volume.squeeze(1)
     if isinstance(volume, torch.Tensor):
@@ -360,9 +353,7 @@ def load_slices(folder: str, device=torch.device("cpu")) -> List[Slice]:
     return [slice for _, slice in sorted(zip(ids, slices))]
 
 
-def load_stack(
-    path_vol: str, path_mask: Optional[str] = None, device=torch.device("cpu")
-) -> Stack:
+def load_stack(path_vol: str, path_mask: Optional[str] = None, device=torch.device("cpu")) -> Stack:
     slices, resolutions, affine = load_nii_volume(path_vol)
     if path_mask is None:
         mask = slices > 0
@@ -396,4 +387,5 @@ def load_stack(
         resolution_y=resolutions[1],
         thickness=resolutions[2],
         gap=resolutions[2],
+        name=os.path.basename(path_vol),
     )

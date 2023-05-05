@@ -20,17 +20,13 @@ class Command(object):
         pass
 
     def get_command(self) -> str:
-        return "-".join(
-            w.lower() for w in re.findall("[A-Z][^A-Z]*", self.__class__.__name__)
-        )
+        return "-".join(w.lower() for w in re.findall("[A-Z][^A-Z]*", self.__class__.__name__))
 
     def new_timer(self, name: Optional[str] = None) -> None:
         t = time.time()
         if len(self.timer) > 1 and self.timer[-1][0] is not None:
             # the previous timer ends
-            logging.info(
-                "%s finished in %.1f s", self.timer[-1][0], t - self.timer[-1][1]
-            )
+            logging.info("%s finished in %.1f s", self.timer[-1][0], t - self.timer[-1][1])
         if name is None:
             if len(self.timer) == 0:  # begining of command
                 pass
