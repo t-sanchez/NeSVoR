@@ -1,6 +1,6 @@
-import SimpleITK as sitk
 from typing import List, Optional, Any, Dict
 from multiprocessing import Pool
+import importlib.util
 import numpy as np
 import torch
 import logging
@@ -10,6 +10,11 @@ from ..image import Stack
 def n4_bias_field_correction(
     stacks: List[Stack], n4_params: Dict[str, Any]
 ) -> List[Stack]:
+    if importlib.util.find_spec("SimpleITK") is None:
+        raise ImportError(
+            "SimpleITK was not found! To use n4 bias field correction, please install SimpleITK."
+        )
+
     pool = Pool(processes=n4_params["n_proc_n4"])
     results = []
     for i, stack in enumerate(stacks):
@@ -52,6 +57,8 @@ def n4_bias_field_correction_single(
     res_z: float,
     n4_params: Dict[str, Any],
 ) -> np.ndarray:
+    import SimpleITK as sitk
+
     sitk_img_full = sitk.GetImageFromArray(image)
     sitk_img_full.SetSpacing([res_z, res_y, res_x])
     if mask is not None:

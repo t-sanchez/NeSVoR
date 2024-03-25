@@ -15,7 +15,7 @@ import logging
 from skimage.morphology import dilation, disk
 from skimage.measure import label
 from ...image import Stack
-from ... import __checkpoint_dir, __monaifbs
+from ... import CHECKPOINT_DIR, MONAIFBS_URL
 
 
 RESOLUTION = 0.8
@@ -24,13 +24,13 @@ H_min, H_factor = 4, 128
 
 
 def get_monaifbs_checkpoint() -> str:
-    model_dir = __checkpoint_dir
+    model_dir = CHECKPOINT_DIR
     model_name = "checkpoint_dynUnet_DiceXent.pt"
     if not os.path.exists(os.path.join(model_dir, model_name)):
         logging.info(
             "monaifbs checkpoint not found. trying to download the checkpoint."
         )
-        url = __monaifbs
+        url = MONAIFBS_URL
         zip_name = "monaifbs_models.tar.gz"
         torch.hub.download_url_to_file(url, os.path.join(model_dir, zip_name))
         with tarfile.open(os.path.join(model_dir, zip_name)) as file:
@@ -46,7 +46,6 @@ def get_monaifbs_checkpoint() -> str:
 
 
 def build_monaifbs_net(device):
-
     logging.info("building monaifbs network")
 
     try:
@@ -94,7 +93,7 @@ def build_monaifbs_net(device):
         res_block=False,
     )
 
-    net.load_state_dict(torch.load(get_monaifbs_checkpoint())["net"])
+    net.load_state_dict(torch.load(get_monaifbs_checkpoint(), device)["net"])
     net = net.to(device)
     net.eval()
 
@@ -187,7 +186,7 @@ def _segment(
     return seg_all
 
 
-def segment(
+def brain_segmentation(
     stacks: List[Stack],
     device,
     batch_size: int,
@@ -198,7 +197,7 @@ def segment(
     net = build_monaifbs_net(device)
     for i, stack in enumerate(stacks):
         logging.info(f"segmenting stack {i}")
-        stack.mask = _segment(
+        seg_mask = _segment(
             stack.slices,
             stack.resolution_x,
             stack.resolution_y,
@@ -208,4 +207,9 @@ def segment(
             radius,
             threshold_small,
         )
+        stack.mask = torch.logical_and(stack.mask, seg_mask)
+        if not stack.mask.any():
+            logging.warning(
+                "One of the input stack is all zero after brain segmentation. Please check your data!"
+            )
     return stacks

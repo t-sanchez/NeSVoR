@@ -1,13 +1,22 @@
 from argparse import Namespace
 from math import log2
-from typing import Optional, Dict, Any, Union, TYPE_CHECKING
+from typing import Optional, Dict, Any, Union, TYPE_CHECKING, Tuple
+import logging
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-import tinycudann as tcnn
+from .hash_grid_torch import HashEmbedder
 from ..transform import RigidTransform, ax_transform_points, mat_transform_points
 from ..utils import resolution2sigma
-import logging
+
+USE_TORCH = False
+
+if not USE_TORCH:
+    try:
+        import tinycudann as tcnn
+    except:
+        logging.warning("Fail to load tinycudann. Will use pytorch implementation.")
+        USE_TORCH = True
 
 
 # key for loss/regularization
@@ -21,14 +30,29 @@ D_REG = "deformReg"
 
 
 def build_encoding(**config):
-    n_input_dims = config.pop("n_input_dims")
-    dtype = config.pop("dtype")
-    return tcnn.Encoding(n_input_dims=n_input_dims, encoding_config=config, dtype=dtype)
+    if USE_TORCH:
+        encoding = HashEmbedder(**config)
+    else:
+        n_input_dims = config.pop("n_input_dims")
+        dtype = config.pop("dtype")
+        try:
+            encoding = tcnn.Encoding(
+                n_input_dims=n_input_dims, encoding_config=config, dtype=dtype
+            )
+        except RuntimeError as e:
+            if "TCNN was not compiled with half-precision support" in str(e):
+                logging.error(
+                    "TCNN was not compiled with half-precision support! "
+                    "Try using --single-precision in the nesvor command! "
+                )
+            raise e
+    return encoding
 
 
 def build_network(**config):
     dtype = config.pop("dtype")
-    if dtype == torch.float16:
+    assert dtype == torch.float16 or dtype == torch.float32
+    if dtype == torch.float16 and not USE_TORCH:
         return tcnn.Network(
             n_input_dims=config["n_input_dims"],
             n_output_dims=config["n_output_dims"],
@@ -40,7 +64,7 @@ def build_network(**config):
                 "n_hidden_layers": config["n_hidden_layers"],
             },
         )
-    elif dtype == torch.float32:
+    else:
         activation = (
             None
             if config["activation"] == "None"
@@ -66,13 +90,15 @@ def build_network(**config):
         if output_activation is not None:
             models.append(output_activation())
         return nn.Sequential(*models)
-    else:
-        raise ValueError("unknown dtype")
 
 
 def compute_resolution_nlevel(
-    bounding_box, coarsest_resolution, finest_resolution, level_scale, spatial_scaling
-):
+    bounding_box: torch.Tensor,
+    coarsest_resolution: float,
+    finest_resolution: float,
+    level_scale: float,
+    spatial_scaling: float,
+) -> Tuple[int, int]:
     base_resolution = (
         (
             (bounding_box[1] - bounding_box[0]).max()
@@ -98,7 +124,7 @@ def compute_resolution_nlevel(
         .int()
         .item()
     )
-    return base_resolution, n_levels
+    return int(base_resolution), int(n_levels)
 
 
 class INR(nn.Module):
@@ -136,7 +162,7 @@ class INR(nn.Module):
             output_activation="None",
             n_neurons=args.width,
             n_hidden_layers=args.depth,
-            dtype=args.dtype,
+            dtype=torch.float32 if args.img_reg_autodiff else args.dtype,
         )
         # logging
         logging.debug(
@@ -158,14 +184,16 @@ class INR(nn.Module):
             self.bounding_box[1, 2],
         )
 
-    def forward(self, x: torch.Tensor, return_all: bool = True):
+    def forward(self, x: torch.Tensor):
         x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
         pe = self.encoding(x)
+        if not self.training:
+            pe = pe.to(dtype=x.dtype)
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
-        if return_all:
+        if self.training:
             return density, pe, z
         else:
             return density
@@ -268,6 +296,12 @@ class NeSVoR(nn.Module):
         args: Namespace,
     ) -> None:
         super().__init__()
+        if "cpu" in str(args.device):  # CPU mode
+            global USE_TORCH
+            USE_TORCH = True
+        else:
+            # set default GPU for tinycudann
+            torch.cuda.set_device(args.device)
         self.spatial_scaling = spatial_scaling
         self.args = args
         self.n_slices = 0
@@ -275,12 +309,6 @@ class NeSVoR(nn.Module):
         self.transformation = transformation
         self.psf_sigma = resolution2sigma(resolution, isotropic=False)
         self.delta = args.delta * v_mean
-        if self.args.image_regularization == "TV":
-            self.image_regularization = tv_reg
-        elif self.args.image_regularization == "edge":
-            self.image_regularization = edge_reg
-        elif self.args.image_regularization == "L2":
-            self.image_regularization = l2_reg
         self.build_network(bounding_box)
         self.to(args.device)
 
@@ -359,7 +387,7 @@ class NeSVoR(nn.Module):
         xyz_psf = torch.randn(
             batch_size, n_samples, 3, dtype=xyz.dtype, device=xyz.device
         )
-        psf = 1
+        # psf = 1
         psf_sigma = self.psf_sigma[slice_idx][:, None]
         # transform points
         t = self.axisangle[slice_idx][:, None]
@@ -404,7 +432,8 @@ class NeSVoR(nn.Module):
         v_out = (bias * density).mean(-1)
         v_out = c * v_out
         if not self.args.no_pixel_variance:
-            var = (bias_detach * psf * var).mean(-1)
+            # var = (bias_detach * psf * var).mean(-1)
+            var = (bias_detach * var).mean(-1)
             var = c.detach() * var
             var = var**2
         if not self.args.no_slice_variance:
@@ -419,11 +448,11 @@ class NeSVoR(nn.Module):
         if self.args.n_levels_bias:
             losses[B_REG] = log_bias.mean() ** 2
         if self.args.deformable:
-            losses[D_REG] = deform_reg_autodiff(self.deform_net, xyz_ori, de)
+            losses[D_REG] = self.deform_reg(
+                xyz, xyz_ori, de
+            )  # deform_reg_autodiff(self.deform_net, xyz_ori, de)
         # image regularization
-        losses[I_REG] = self.image_regularization(
-            density, xyz * self.spatial_scaling, self.delta
-        )
+        losses[I_REG] = self.img_reg(density, xyz)
 
         return losses
 
@@ -432,7 +461,6 @@ class NeSVoR(nn.Module):
         x: torch.Tensor,
         se: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-
         density, pe, z = self.inr(x)
         prefix_shape = density.shape
         results = {"density": density}
@@ -463,59 +491,60 @@ class NeSVoR(nn.Module):
         loss_T = torch.mean(err[:, 3:] ** 2)
         return loss_R + 1e-3 * self.spatial_scaling * self.spatial_scaling * loss_T
 
+    def img_reg(self, density, xyz):
+        if self.args.image_regularization == "none":
+            return torch.zeros((1,), dtype=density.dtype, device=density.device)
 
-def tv_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
-    d_density = density - torch.flip(density, (1,))
-    dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
-    dd_dx = d_density / dx2.sqrt()
-    return torch.abs(dd_dx).mean()
+        if self.args.img_reg_autodiff:
+            n_sample = 4
+            xyz = xyz[:, :n_sample].flatten(0, 1).detach()
+            xyz.requires_grad_()
+            density, _, _ = self.inr(xyz)
+            grad = (
+                torch.autograd.grad((density.sum(),), (xyz,), create_graph=True)[0]
+                / self.spatial_scaling
+            )
+            grad2 = grad.pow(2)
+        else:
+            xyz = xyz * self.spatial_scaling
+            d_density = density - torch.flip(density, (1,))
+            dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
+            grad2 = d_density**2 / dx2
 
+        if self.args.image_regularization == "TV":
+            return grad2.sqrt().mean()
+        elif self.args.image_regularization == "edge":
+            return self.delta * (
+                (1 + grad2 / (self.delta * self.delta)).sqrt().mean() - 1
+            )
+        elif self.args.image_regularization == "L2":
+            return grad2.mean()
+        else:
+            raise ValueError("unknown image regularization!")
 
-def edge_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
-    d_density = density - torch.flip(density, (1,))
-    dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
-    dd2_dx2 = d_density**2 / dx2 / (delta * delta)
-    return delta * ((1 + dd2_dx2).sqrt().mean() - 1)
+    def deform_reg(self, out, xyz, e):
+        if True:  # use autodiff
+            n_sample = 4
+            x = xyz[:, :n_sample].flatten(0, 1).detach()
+            e = e[:, :n_sample].flatten(0, 1).detach()
 
-
-""""
-def edge_reg_autodiff(density: torch.Tensor, xyz: torch.Tensor, delta: float):
-    grad = torch.autograd.grad((density.sum(),), (xyz,), create_graph=True)[0]
-    grad2 = (grad**2).sum(-1)
-    print(grad.shape, grad2.shape)
-    return (delta * delta + grad2).sqrt().mean() - delta
-"""
-
-
-def l2_reg(density: torch.Tensor, xyz: torch.Tensor, delta: float):
-    d_density = density - torch.flip(density, (1,))
-    dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
-    dd2_dx2 = d_density**2 / dx2
-    return dd2_dx2.mean()
-
-
-def deform_reg(out: torch.Tensor, xyz: torch.Tensor):
-    out = out - xyz
-    d_out2 = ((out - torch.flip(out, (1,))) ** 2).sum(-1) + 1e-6
-    dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
-    dd_dx = d_out2.sqrt() / dx2.sqrt()
-    return F.smooth_l1_loss(dd_dx, torch.zeros_like(dd_dx).detach(), beta=1e-3)
-
-
-def deform_reg_autodiff(model, x, e):
-    n_sample = 4
-    x = x[:, :n_sample].flatten(0, 1).detach()
-    e = e[:, :n_sample].flatten(0, 1).detach()
-
-    x.requires_grad_()
-    outputs = model(x, e)
-    grads = []
-    out_sum = []
-    for i in range(3):
-        out_sum.append(outputs[:, i].sum())
-        grads.append(torch.autograd.grad((out_sum[-1],), (x,), create_graph=True)[0])
-    jacobian = torch.stack(grads, -1)
-    jtj = torch.matmul(jacobian, jacobian.transpose(-1, -2))
-    I = torch.eye(3, dtype=jacobian.dtype, device=jacobian.device).unsqueeze(0)
-    sq_residual = ((jtj - I) ** 2).sum((-2, -1))
-    return torch.nan_to_num(sq_residual, 0.0, 0.0, 0.0).mean()
+            x.requires_grad_()
+            outputs = self.deform_net(x, e)
+            grads = []
+            out_sum = []
+            for i in range(3):
+                out_sum.append(outputs[:, i].sum())
+                grads.append(
+                    torch.autograd.grad((out_sum[-1],), (x,), create_graph=True)[0]
+                )
+            jacobian = torch.stack(grads, -1)
+            jtj = torch.matmul(jacobian, jacobian.transpose(-1, -2))
+            I = torch.eye(3, dtype=jacobian.dtype, device=jacobian.device).unsqueeze(0)
+            sq_residual = ((jtj - I) ** 2).sum((-2, -1))
+            return torch.nan_to_num(sq_residual, 0.0, 0.0, 0.0).mean()
+        else:
+            out = out - xyz
+            d_out2 = ((out - torch.flip(out, (1,))) ** 2).sum(-1) + 1e-6
+            dx2 = ((xyz - torch.flip(xyz, (1,))) ** 2).sum(-1) + 1e-6
+            dd_dx = d_out2.sqrt() / dx2.sqrt()
+            return F.smooth_l1_loss(dd_dx, torch.zeros_like(dd_dx).detach(), beta=1e-3)

@@ -13,6 +13,8 @@ def volume_intersect(volumes: List[Volume], box: bool) -> Volume:
         assign_mask = volume.mask.clone()
         volume.mask[assign_mask] = volumes[i].sample_points(volume.xyz_masked) > 0
     mask = volume.mask
+    if not mask.any():
+        raise ValueError("The intersection of inputs is empty!")
     if box:
         nz = torch.nonzero(mask.sum(dim=[1, 2]))
         i0 = int(nz[0, 0])
