@@ -99,13 +99,13 @@ def sample_sigma(
             results["density"].mean(-1).to(slice_sampled.image.dtype)
         )
         slice_sampled.sigma[slice_sampled.mask] = (
-            results["log_var"].mean(-1).exp().to(slice_sampled.image.dtype)
+            results["log_var"].exp().mean(-1).to(slice_sampled.image.dtype)
         )
         slice_sampled.image_var[slice_sampled.mask] = (
             results["density"].var(-1).to(slice_sampled.image.dtype)
         )
         slice_sampled.sigma_var[slice_sampled.mask] = (
-            results["log_var"].var(-1).exp().to(slice_sampled.image.dtype)
+            results["log_var"].exp().var(-1).to(slice_sampled.image.dtype)
         )
     return slice_sampled
 
